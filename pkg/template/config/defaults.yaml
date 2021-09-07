@@ -1,0 +1,11 @@
++++
+proto:
+  protoDir: {{ .ProtoDir }}
+
+swagger:
+  title: {{ .Title }}
+  description: {{ .Description }}
+  version: {{ .Version }}
+  goPackage: {{ .GoPackage }}
+  tagName: {{ .TagName }}
+  basePath : {{ .BasePath }}

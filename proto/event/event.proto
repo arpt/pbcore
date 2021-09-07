@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package cloudendpointseventapiexample;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "proto/event;event";
+
+// Event Header and Data Attributes Sent Back in the Event Get Request Response
+message Event {
+    google.protobuf.Any data = 1;
+    string eventId = 2;
+    string eventModel = 3;
+    string eventSchema = 4;
+    string eventSource = 5;
+    google.protobuf.Timestamp eventTimestamp = 6;
+    string eventType = 7;
+}
+
+// Event Data of the Any Proto Type that allows the Payload to be Decoded to the exact Proto Type
+// The Proto Type must be defined within the Proto / API Spec to be successfully decoded
+message EventData {
+    google.protobuf.Any data = 1;
+}
+
+// Event Header Attributes Sent Back in the Event Get Request Response
+message EventHeader {
+    string eventId = 1;
+    string eventModel = 2;
+    string eventSchema = 3;
+    string eventSource = 4;
+    google.protobuf.Timestamp eventTimestamp = 5;
+    string eventType = 6;
+}
+
+message EventSuccessResponse {
+    string id = 1;
+}
+
+// Example Event Model that Can Be used within Event Data to be passed to backend services
+message ExampleEventAnyModel {
+    string description = 1;
+    string id = 2;
+    string name = 3;
+    string raw = 4;
+}
+
+message GetServiceNameEventEventTypeEventIdRequest {
+    // Unique EventId
+    string EventId = 1;
+
+    // Event Type
+    string EventType = 2;
+
+    // Service Name for the routing of the Event
+    string ServiceName = 3;
+}
+
+message PostServiceNameEventEventTypeRequest {
+    // Event Payload
+    EventData Event = 1;
+
+    // Event Type Based on Configured Types
+    string EventType = 2;
+
+    // Service Name for the routing of the Event
+    string ServiceName = 3;
+}
+
+service CloudEndpointsEventAPIExampleService {
+    // Event API
+    // 
+    // Event API
+    rpc GetServiceNameEventEventTypeEventId(GetServiceNameEventEventTypeEventIdRequest) returns (Event) {}
+
+    // Event API
+    // 
+    // Event API for Saving Events
+    rpc PostServiceNameEventEventType(PostServiceNameEventEventTypeRequest) returns (EventSuccessResponse) {}
+}

@@ -1,0 +1,225 @@
+name: Go Source and Build Docker Image
+
+######################## REPOSITORY VARIABLES ##################################
+env:
+  APPLICATION_NAME: '{{ .AppName }}'        # 'app-server'
+  ESP_APPLICATION_NAME: '{{ .EspAppName }}' # 'esp-cloudendpoint name'
+  DOCKER_REPO: '{{ .DockerRepo }}' # 'gcr.io'
+  ENDPOINTS_SERVICE_NAME: '{{ .ServiceName }}' # 'esp-endpoint-name'
+  GCP_REGION: '{{ .GcpRegion }}'
+
+  # DEV
+  GCP_PROJECT_DEV: '{{ .GcpProjectIdDev }}' # 'ingka-digital-us-dev'
+  GCP_ESP_DEV: '{{ .GcpEspUrlDev }}' #  'cloudendpoint-saferhome-zhwh7jmafa-uc.a.run.app'
+  GCP_ESP_CONFIG_DEV: '{{ .GcpEspConfigDev }}' # 'dev_api_config.yaml'
+  GCP_SERVICE_ACCOUNT_DEV: '{{ .GcpServiceAccountDev }}'
+
+  # PROD
+  GCP_PROJECT_PROD: '{{ .GcpProjectIdProd }}' # 'ingka-digital-us-dev'
+  GCP_ESP_PROD: '{{ .GcpEspUrlProd }}' #  'cloudendpoint-saferhome-zhwh7jmafa-uc.a.run.app'
+  GCP_ESP_CONFIG_PROD: '{{ .GcpEspConfigProd }}' # 'dev_api_config.yaml'
+  GCP_SERVICE_ACCOUNT_PROD: '{{ .GcpServiceAccountProd }}'
+
+# BUILD VARS
+  GO_VERSION: 1.16
+
+################################################################################
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  # Also trigger on page_build, as well as release created events
+  page_build:
+  release:
+    types: # This configuration does not affect the page_build event above
+      - released
+      - prereleased
+
+jobs:
+  build:
+    name: Build Go Binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build Go Binary
+        run: go build -v ./...
+
+  deploy_dev:
+    name: Deploy DEV
+    runs-on: ubuntu-latest
+    environment: ingka-digital-us-dev
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'release'
+    needs: [ build ]
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup BuildPacks
+        uses: buildpacks/github-actions/setup-pack@v4.1.1
+
+      - name: Login to GCR
+        uses: docker/login-action@v1
+        with:
+          registry: gcr.io
+          username: _json_key
+          password: ${{ secrets.GCR_DEPLOYER_DEV }}
+
+      - id: prep_env
+        name: Prepare Environment
+        run: |
+          # version logic
+          VERSION=latest
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            VERSION=nightly
+          fi
+          TAGS="${{ env.DOCKER_REPO }}/${{ env.GCP_PROJECT_DEV }}/${{ env.APPLICATION_NAME }}:${VERSION}"
+          # output variables to env
+          echo "::set-output name=tags::${TAGS}"
+          echo "::set-output name=version::${VERSION}"
+      - name: BuildPack with Publish
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          pack build ${{ steps.prep_env.outputs.tags }} --builder gcr.io/buildpacks/builder:v1 --env GOOGLE_BUILDABLE="./cmd/server" --publish
+      - name: Deploy SaferHome to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@main
+        with:
+          service: ${{ env.APPLICATION_NAME }}
+          image: ${{ steps.prep_env.outputs.tags }}
+          credentials: ${{ secrets.GCR_DEPLOYER_DEV }}
+          region: ${{ env.GCP_REGION }}
+          env_vars: PROJECT_ID="${{ env.GCP_PROJECT_DEV }}"
+          flags: --max-instances=2
+
+      - name: Set up GCloud SDK
+        uses: google-github-actions/setup-gcloud@master
+        with:
+          project_id: ${{ env.GCP_PROJECT_DEV }}
+          service_account_key: ${{ secrets.GCR_DEPLOYER_DEV }}
+          export_default_credentials: true
+
+      - name: Enable Google Endpoints and Build ESPv2 Image
+        id: build_esp
+        run: |
+          #!/usr/bin/env bash
+          gcloud endpoints services deploy --project=${{ env.GCP_PROJECT_DEV }}  ./proto/${{ env.ENDPOINTS_SERVICE_NAME }}/${{ env.ENDPOINTS_SERVICE_NAME }}_annotated.pb  ./cloudendpoints/${{ env.GCP_ESP_CONFIG_DEV }}
+          gcloud endpoints configs list --project=${{ env.GCP_PROJECT_DEV }}  --service=${{ env.GCP_ESP_DEV }} --format="value(CONFIG_ID)" > ./esp/dev_config_ids ; head -n 1 ./esp/dev_config_ids > dev_tag_version
+          gcloud services enable --project=${{ env.GCP_PROJECT_DEV }} ${{ env.GCP_ESP_DEV }}
+          ./esp/gcloud_build_image.sh -p ${{ env.GCP_PROJECT_DEV }} -s ${{ env.GCP_ESP_DEV }} -c $(head -n 1 dev_tag_version) > ./esp/image_info
+          ENDPOINT_IMAGE_NAME=$(grep -o -e  "gcr.*\d.*  " ./esp/image_info)
+          sleep 1
+          echo "::set-output name=espv2_image_name::${ENDPOINT_IMAGE_NAME}"
+      - name: Deploy ESPv2 to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@main
+        with:
+          service: ${{ env.ESP_APPLICATION_NAME }}
+          image: ${{ steps.build_esp.outputs.espv2_image_name }}
+          credentials: ${{ secrets.GCR_DEPLOYER_DEV }}
+          region: ${{ env.GCP_REGION }}
+          flags: --max-instances=2
+
+      - name: Update Google Endpoints
+        run: |
+          #!/usr/bin/env bash
+          gcloud run deploy cloudendpoint-${{ env.ENDPOINTS_SERVICE_NAME }} \
+            --image=${{ steps.build_esp.outputs.espv2_image_name }} \
+            --project=${{ env.GCP_PROJECT_DEV }} \
+            --allow-unauthenticated \
+            --platform managed \
+            --region=${{ env.GCP_REGION }}
+
+  deploy_prod:
+    name: Deploy PROD
+    runs-on: ubuntu-latest
+    environment: ingka-digital-us-prod
+    if: github.event_name == 'release'
+    needs: [ build ]
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup BuildPacks
+        uses: buildpacks/github-actions/setup-pack@v4.1.1
+
+      - name: Login to GCR
+        uses: docker/login-action@v1
+        with:
+          registry: gcr.io
+          username: _json_key
+          password: ${{ secrets.GCR_DEPLOYER_PROD }}
+
+      - id: prep_env
+        name: Prepare Environment
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          TAGS="${{ env.DOCKER_REPO }}/${{ env.GCP_PROJECT_PROD }}/${{ env.APPLICATION_NAME }}:${VERSION}"
+          # output variables to env
+          echo "::set-output name=tags::${TAGS}"
+          echo "::set-output name=version::${VERSION}"
+      - name: BuildPack with Publish
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          pack build ${{ steps.prep_env.outputs.tags }} --builder gcr.io/buildpacks/builder:v1 --env GOOGLE_BUILDABLE="./cmd/server" --publish
+
+      - name: Deploy SaferHome to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@main
+        with:
+          service: ${{ env.APPLICATION_NAME }}
+          image: ${{ steps.prep_env.outputs.tags }}
+          credentials: ${{ secrets.GCR_DEPLOYER_PROD }}
+          region: ${{ env.GCP_REGION }}
+          env_vars: PROJECT_ID="${{ env.GCP_PROJECT_PROD }}"
+          flags: --max-instances=5 --service-account="${{ env.GCP_SERVICE_ACCOUNT_PROD }}"
+
+      - name: Set up GCloud SDK
+        uses: google-github-actions/setup-gcloud@master
+        with:
+          project_id: ${{ env.GCP_PROJECT_PROD }}
+          service_account_key: ${{ secrets.GCR_DEPLOYER_PROD }}
+          export_default_credentials: true
+
+      - name: Enable Google Endpoints and Build ESPv2 Image
+        id: build_esp
+        run: |
+          #!/usr/bin/env bash
+          gcloud endpoints services deploy --project=${{ env.GCP_PROJECT_PROD }}  ./proto/${{ env.ENDPOINTS_SERVICE_NAME }}/${{ env.ENDPOINTS_SERVICE_NAME }}_annotated.pb  ./cloudendpoints/${{ env.GCP_ESP_CONFIG_PROD }}
+          gcloud endpoints configs list --project=${{ env.GCP_PROJECT_PROD }}  --service=${{ env.GCP_ESP_PROD }} --format="value(CONFIG_ID)" > ./esp/dev_config_ids ; head -n 1 ./esp/dev_config_ids > dev_tag_version
+          gcloud services enable --project=${{ env.GCP_PROJECT_PROD }} ${{ env.GCP_ESP_PROD }}
+          ./esp/gcloud_build_image.sh -p ${{ env.GCP_PROJECT_PROD }} -s ${{ env.GCP_ESP_PROD }} -c $(head -n 1 dev_tag_version) > ./esp/image_info
+          ENDPOINT_IMAGE_NAME=$(grep -o -e  "gcr.*\d.*  " ./esp/image_info)
+          sleep 1
+          echo "::set-output name=espv2_image_name::${ENDPOINT_IMAGE_NAME}"
+      - name: Deploy ESPv2 to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@main
+        with:
+          service: ${{ env.ESP_APPLICATION_NAME }}
+          image: ${{ steps.build_esp.outputs.espv2_image_name }}
+          credentials: ${{ secrets.GCR_DEPLOYER_PROD }}
+          region: ${{ env.GCP_REGION }}
+          flags: --max-instances=5
+
+      - name: Update Google Endpoints
+        run: |
+          #!/usr/bin/env bash
+          gcloud run deploy cloudendpoint-${{ env.ENDPOINTS_SERVICE_NAME }} \
+            --image=${{ steps.build_esp.outputs.espv2_image_name }} \
+            --project=${{ env.GCP_PROJECT_PROD }} \
+            --allow-unauthenticated \
+            --platform managed \
+            --region=${{ env.GCP_REGION }}

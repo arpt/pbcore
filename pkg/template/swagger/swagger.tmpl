@@ -1,0 +1,17 @@
+swagger: '2.0'
+info:
+  title: {{ .Title }}
+  description: {{ .Description }}
+  version: {{ .Version }}
+
+x-global-options:
+  go_package: {{ .GoPackage }}
+
+tags:
+  - name: {{ .TagName }}
+
+produces:
+  - application/json
+consumes:
+  - application/json
+basePath: {{ .BasePath }}

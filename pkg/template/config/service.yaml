@@ -1,0 +1,5 @@
++++
+serviceName: {{ .ServiceName }}
+projectId: {{ .ProjectId }}
+espApiUrl: {{ .EspApiUrl }}
+region: {{ .Region }}
